@@ -1,9 +1,17 @@
 name: Release
 
-# Tạo bản phát hành (APK ký sẵn) khi push tag dạng v1.2.3 hoặc v1.2.3+4,
-# hoặc chạy tay từ tab Actions → Release → Run workflow.
+# Tự phát hành khi có push lên main:
+#   - Tự tăng phiên bản (mặc định +0.0.1), commit "chore(release)..." và tạo tag
+#   - Build APK ký sẵn rồi tạo GitHub Release
+# Push tag v* thủ công hoặc chạy tay trong tab Actions cũng dùng được workflow này.
+#
+# Commit message điều khiển:
+#   [release:minor]  tăng minor (1.2.3 -> 1.3.0)
+#   [release:major]  tăng major (1.2.3 -> 2.0.0)
+#   [skip release]   không build/phát hành cho lần push này
 on:
   push:
+    branches: [main]
     tags:
       - "v[0-9]*"
   workflow_dispatch:
@@ -30,14 +38,21 @@ env:
   FLUTTER_VERSION: "3.47.2"
   APP_FILE_PREFIX: groundnut-disease-app
 
+# Chỉ chạy một bản phát hành tại một thời điểm để tránh hai commit cùng tăng version.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
+    # Bot không chạy lại với chính commit/tag do nó tạo ra (phòng khi dùng PAT),
+    # và bỏ qua commit có [skip release].
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_type == 'tag' && github.actor != 'github-actions[bot]') ||
+      (github.event_name == 'push' && github.ref_type == 'branch' && !contains(github.event.head_commit.message, '[skip release]'))
     outputs:
       version_name: ${{ steps.version.outputs.name }}
       version_code: ${{ steps.version.outputs.code }}
@@ -76,11 +91,13 @@ jobs:
       - name: Xác định phiên bản
         id: version
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           INPUT_VERSION_NAME: ${{ inputs.version_name }}
           INPUT_VERSION_CODE: ${{ inputs.version_code }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -91,7 +108,44 @@ jobs:
             PUB_CODE=1
           fi
 
+          bump_version() {
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$1"
+            case "$2" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              *) PATCH=$((PATCH + 1)) ;;
+            esac
+            printf '%s.%s.%s' "$MAJOR" "$MINOR" "$PATCH"
+          }
+
+          version_gt() {
+            [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+          }
+
+          # Tag phát hành gần nhất, ví dụ v1.2.3 (có thể kèm +build).
+          LATEST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1 || true)"
+          LATEST_NAME=""
+          LATEST_CODE=0
+          if [ -n "$LATEST_TAG" ]; then
+            LATEST_VERSION="${LATEST_TAG#v}"
+            case "$LATEST_VERSION" in
+              *+*)
+                LATEST_CODE="${LATEST_VERSION#*+}"
+                LATEST_NAME="${LATEST_VERSION%%+*}"
+                ;;
+              *) LATEST_NAME="$LATEST_VERSION" ;;
+            esac
+            # Tag không ghi mã build: đọc versionCode từ pubspec.yaml tại commit của tag.
+            if [ "$LATEST_CODE" -eq 0 ]; then
+              LATEST_REF_VERSION="$(git show "$LATEST_TAG:pubspec.yaml" 2>/dev/null | sed -n 's/^version:[[:space:]]*//p' | head -n1 || true)"
+              case "$LATEST_REF_VERSION" in
+                *+*) LATEST_CODE="${LATEST_REF_VERSION#*+}" ;;
+              esac
+            fi
+          fi
+
           if [ "$REF_TYPE" = "tag" ]; then
+            # Push tag thủ công: dùng đúng phiên bản trên tag.
             TAG_VERSION="${REF_NAME#v}"
             TAG_CODE=""
             case "$TAG_VERSION" in
@@ -104,10 +158,41 @@ jobs:
             NAME="$TAG_VERSION"
             CODE="${TAG_CODE:-$PUB_CODE}"
             PRERELEASE="false"
-          else
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Chạy tay: phát hành theo version hiện có, không tự tăng.
             NAME="${INPUT_VERSION_NAME:-$PUB_NAME}"
             CODE="${INPUT_VERSION_CODE:-$PUB_CODE}"
             PRERELEASE="${INPUT_PRERELEASE:-false}"
+          else
+            # Push lên main: tự tính phiên bản kế tiếp.
+            LEVEL="patch"
+            case "${COMMIT_MESSAGE:-}" in
+              *'[release:major]'*) LEVEL="major" ;;
+              *'[release:minor]'*) LEVEL="minor" ;;
+            esac
+
+            if [ -z "$LATEST_NAME" ]; then
+              NAME="$PUB_NAME"
+              CODE="$PUB_CODE"
+            else
+              if version_gt "$PUB_NAME" "$LATEST_NAME"; then
+                # pubspec đã được sửa tay lên cao hơn bản phát hành gần nhất: tôn trọng.
+                NAME="$PUB_NAME"
+              else
+                NAME="$(bump_version "$LATEST_NAME" "$LEVEL")"
+              fi
+              CODE="$PUB_CODE"
+              NEXT_CODE=$((LATEST_CODE + 1))
+              if [ "$CODE" -lt "$NEXT_CODE" ]; then
+                CODE="$NEXT_CODE"
+              fi
+            fi
+            # Nếu tag đã tồn tại (lần chạy trước dở dang), tăng tiếp đến khi trống.
+            for _ in 1 2 3 4 5; do
+              git rev-parse -q --verify "refs/tags/v$NAME" >/dev/null || break
+              NAME="$(bump_version "$NAME" patch)"
+            done
+            PRERELEASE="false"
           fi
 
           if ! printf '%s' "$NAME" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -220,6 +305,43 @@ jobs:
           EOF
           sed -e "s/@NAME@/${NAME}/g" -e "s/@CODE@/${CODE}/g" dist/install-notes.tpl.md > dist/install-notes.md
           rm dist/install-notes.tpl.md
+
+      - name: Tạo commit tăng phiên bản và tag
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          sed -i "s/^version: .*/version: ${VERSION_NAME}+${VERSION_CODE}/" pubspec.yaml
+          git add pubspec.yaml
+          git commit -m "chore(release): v${VERSION_NAME}+${VERSION_CODE} [skip release]"
+
+          # Push có thể bị từ chối nếu ai đó vừa push thêm; rebase rồi thử lại.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Không push được commit tăng phiên bản lên main."
+              exit 1
+            fi
+            echo "::warning::Push bị từ chối, rebase lại rồi thử lần $attempt..."
+            git fetch origin main
+            git rebase origin/main
+          done
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG đã tồn tại, dừng lại để không ghi đè bản phát hành cũ."
+            exit 1
+          fi
+          git tag -a "$TAG" -m "Bệnh Lạc v$VERSION_NAME"
+          git push origin "$TAG"
+          echo "Đã tăng phiên bản lên v$VERSION_NAME (build $VERSION_CODE) và tạo tag $TAG."
 
       - name: Lưu artifact
         uses: actions/upload-artifact@v7

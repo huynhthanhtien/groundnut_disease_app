@@ -72,35 +72,36 @@ flutter build apk --release            # APK universal (ký bằng release key n
 flutter build apk --release --split-per-abi
 ```
 
-## Phát hành phiên bản mới (CI/CD)
-
-GitHub Actions làm hết phần build và tạo bản phát hành:
+## Phát hành tự động (CI/CD)
 
 - `.github/workflows/ci.yml` — mỗi push vào `main` và mỗi pull request: chạy
   `flutter analyze` + `flutter test`.
-- `.github/workflows/release.yml` — khi push tag `v*` (hoặc chạy tay trong tab
-  **Actions → Release → Run workflow**): build APK universal + APK theo ABI, kiểm
-  tra chữ ký, rồi tạo GitHub Release kèm hướng dẫn cài đặt và `SHA256SUMS.txt`.
-  Người khác tải ở trang Releases là cài được ngay.
+- `.github/workflows/release.yml` — **mỗi push vào `main` tự động phát hành**:
+  1. chạy `flutter analyze` + `flutter test`;
+  2. tự tăng phiên bản (mặc định patch: `1.0.0` → `1.0.1`) và build number;
+  3. commit `chore(release): v1.0.1+2` + tạo tag `v1.0.1`;
+  4. build APK universal + APK theo ABI, kiểm tra chữ ký, tạo GitHub Release kèm
+     hướng dẫn cài đặt và `SHA256SUMS.txt`.
 
-Cách phát hành:
+Không cần làm gì thêm: sửa code → commit → push `main` → khoảng 5 phút sau bản
+mới có trên trang Releases.
 
-1. Sửa `version` trong `pubspec.yaml`, tăng **cả build number**, ví dụ
-   `version: 1.1.0+2` (Android dùng build number để biết bản nào mới hơn).
-2. Commit, push lên `main` và chờ CI xanh.
-3. Tạo tag trùng tên phiên bản rồi push tag:
+Điều khiển bằng commit message:
 
-   ```bash
-   git tag v1.1.0
-   git push origin main --follow-tags
-   ```
+| Ghi trong commit message | Tác dụng |
+| --- | --- |
+| `[release:minor]` | tăng minor: `1.2.3` → `1.3.0` |
+| `[release:major]` | tăng major: `1.2.3` → `2.0.0` |
+| `[skip release]` | chỉ push code, không build/phát hành (vd. sửa README) |
 
-   Tag phải khớp phần tên trong `pubspec.yaml` (`1.1.0`). Muốn đổi build number
-   mà không đổi tên phiên bản thì dùng tag `v1.1.0+3`.
+Muốn nhảy thẳng tới một phiên bản cụ thể thì sửa `version` trong `pubspec.yaml`
+lên cao hơn bản gần nhất (workflow tôn trọng version đó, chỉ đảm bảo build number
+tăng). Sau khi workflow tự commit phiên bản mới vào `main`, ở máy nhớ
+`git pull --rebase` trước khi push tiếp để tránh lệch nhánh.
 
-Hoặc vào **Actions → Release → Run workflow** để phát hành theo `version` hiện
-có trong `pubspec.yaml`, không cần tạo tag (có thể nhập đè tên/mã phiên bản và
-đánh dấu pre-release).
+Cần phát hành lại mà không tăng phiên bản: **Actions → Release → Run workflow**.
+Vẫn có thể push tag thủ công (`git tag v1.2.3 && git push origin v1.2.3`) — tag
+phải khớp `version` trong `pubspec.yaml`.
 
 ## Ký bản phát hành
 
