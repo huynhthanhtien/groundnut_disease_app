@@ -1,8 +1,28 @@
 # Bệnh Lạc — nhận diện bệnh cây lạc từ ảnh
 
+[![CI](https://github.com/huynhthanhtien/groundnut_disease_app/actions/workflows/ci.yml/badge.svg)](https://github.com/huynhthanhtien/groundnut_disease_app/actions/workflows/ci.yml)
+[![Release](https://github.com/huynhthanhtien/groundnut_disease_app/actions/workflows/release.yml/badge.svg)](https://github.com/huynhthanhtien/groundnut_disease_app/actions/workflows/release.yml)
+
 Ứng dụng Flutter (Android) chụp/chọn ảnh lá hoặc quả lạc, nhận diện bệnh bằng
 mô hình YOLOv8 xuất sang TFLite (chạy hoàn toàn trên máy, không cần mạng), và
 đưa ra hướng dẫn xử lý.
+
+## Tải về và cài đặt
+
+Bản phát hành mới nhất:
+**<https://github.com/huynhthanhtien/groundnut_disease_app/releases/latest>**
+
+1. Mở link trên bằng điện thoại Android.
+2. Tải file `groundnut-disease-app-<phiên bản>-universal.apk` (cài được trên mọi
+   máy). Máy 64-bit có thể dùng bản `arm64-v8a` nhẹ hơn, máy 32-bit cũ dùng bản
+   `armeabi-v7a`.
+3. Mở file vừa tải. Nếu Android hỏi, bật **"Cài đặt ứng dụng không rõ nguồn
+   gốc"** cho trình duyệt hoặc ứng dụng quản lý file, rồi chọn **Cài đặt**.
+4. Các bản sau cài đè lên bản cũ được (giữ nguyên lịch sử quét) vì mọi bản phát
+   hành đều ký bằng cùng một khóa.
+
+Yêu cầu: Android 7.0 (API 24) trở lên. File `SHA256SUMS.txt` trong mỗi bản phát
+hành để kiểm tra file tải về.
 
 ## Tính năng
 
@@ -48,7 +68,66 @@ flutter pub get
 flutter run            # cần thiết bị Android
 flutter test           # unit + widget test
 flutter test integration_test/batch_eval_test.dart   # chạy model thật trên thiết bị
+flutter build apk --release            # APK universal (ký bằng release key nếu đã cấu hình)
+flutter build apk --release --split-per-abi
 ```
+
+## Phát hành phiên bản mới (CI/CD)
+
+GitHub Actions làm hết phần build và tạo bản phát hành:
+
+- `.github/workflows/ci.yml` — mỗi push vào `main` và mỗi pull request: chạy
+  `flutter analyze` + `flutter test`.
+- `.github/workflows/release.yml` — khi push tag `v*` (hoặc chạy tay trong tab
+  **Actions → Release → Run workflow**): build APK universal + APK theo ABI, kiểm
+  tra chữ ký, rồi tạo GitHub Release kèm hướng dẫn cài đặt và `SHA256SUMS.txt`.
+  Người khác tải ở trang Releases là cài được ngay.
+
+Cách phát hành:
+
+1. Sửa `version` trong `pubspec.yaml`, tăng **cả build number**, ví dụ
+   `version: 1.1.0+2` (Android dùng build number để biết bản nào mới hơn).
+2. Commit, push lên `main` và chờ CI xanh.
+3. Tạo tag trùng tên phiên bản rồi push tag:
+
+   ```bash
+   git tag v1.1.0
+   git push origin main --follow-tags
+   ```
+
+   Tag phải khớp phần tên trong `pubspec.yaml` (`1.1.0`). Muốn đổi build number
+   mà không đổi tên phiên bản thì dùng tag `v1.1.0+3`.
+
+Hoặc vào **Actions → Release → Run workflow** để phát hành theo `version` hiện
+có trong `pubspec.yaml`, không cần tạo tag (có thể nhập đè tên/mã phiên bản và
+đánh dấu pre-release).
+
+## Ký bản phát hành
+
+APK trên GitHub Releases được ký bằng khóa phát hành riêng (không phải debug key),
+nên cài được trên mọi máy và các bản cập nhật cài đè lên nhau được.
+
+- Khóa ký: `android/app/release.jks`; mật khẩu/alias: `android/key.properties`.
+  Cả hai đã nằm trong `.gitignore` — **đừng commit**, nhưng hãy **sao lưu ở nơi an
+  toàn**. Mất khóa thì không thể phát hành bản cập nhật đè lên bản cũ được nữa
+  (người dùng phải gỡ app rồi cài lại).
+- CI lấy khóa từ 4 repo secrets: `ANDROID_KEYSTORE_BASE64`
+  (nội dung `base64 -w0 android/app/release.jks`), `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Đổi khóa thì cập nhật lại secrets.
+- Máy chưa có `android/key.properties` vẫn build local được, nhưng bản đó ký bằng
+  debug key — chỉ dùng để thử, không phát hành.
+
+`android/key.properties` có dạng:
+
+```properties
+storePassword=<mật khẩu keystore>
+keyPassword=<mật khẩu khóa>
+keyAlias=groundnut
+storeFile=release.jks
+```
+
+Sau này nếu đưa lên Google Play, dùng đúng khóa này (hoặc bật Play App Signing)
+và build `flutter build appbundle --release`.
 
 ## Nội dung cần duyệt
 

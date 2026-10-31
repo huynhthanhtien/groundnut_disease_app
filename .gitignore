@@ -44,5 +44,14 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Bản phát hành: khóa ký và mật khẩu, không bao giờ commit
+*.jks
+*.keystore
+key.properties
+/android/key.properties
+
+# File build release gom ra để đính kèm GitHub Release
+/dist/
+
 # Widget Preview related
 .widget_preview/

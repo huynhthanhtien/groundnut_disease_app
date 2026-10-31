@@ -1,0 +1,281 @@
+name: Release
+
+# Tạo bản phát hành (APK ký sẵn) khi push tag dạng v1.2.3 hoặc v1.2.3+4,
+# hoặc chạy tay từ tab Actions → Release → Run workflow.
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Tên phiên bản X.Y.Z (bỏ trống: lấy version trong pubspec.yaml)"
+        required: false
+        type: string
+      version_code:
+        description: "Mã phiên bản Android, số nguyên tăng dần (bỏ trống: lấy từ pubspec.yaml)"
+        required: false
+        type: string
+      prerelease:
+        description: "Đánh dấu là bản thử nghiệm (pre-release)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  # Giữ khớp với phiên bản Flutter ở máy (xem .metadata) và với ci.yml.
+  FLUTTER_VERSION: "3.47.2"
+  APP_FILE_PREFIX: groundnut-disease-app
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    outputs:
+      version_name: ${{ steps.version.outputs.name }}
+      version_code: ${{ steps.version.outputs.code }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cài JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cài Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Tải dependencies
+        run: flutter pub get
+
+      - name: Kiểm tra chất lượng
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Xác định phiên bản
+        id: version
+        env:
+          INPUT_VERSION_NAME: ${{ inputs.version_name }}
+          INPUT_VERSION_CODE: ${{ inputs.version_code }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          PUBSPEC_VERSION="$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1)"
+          PUB_NAME="${PUBSPEC_VERSION%%+*}"
+          PUB_CODE="${PUBSPEC_VERSION#*+}"
+          if [ -z "$PUB_CODE" ] || [ "$PUB_CODE" = "$PUBSPEC_VERSION" ]; then
+            PUB_CODE=1
+          fi
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG_VERSION="${REF_NAME#v}"
+            TAG_CODE=""
+            case "$TAG_VERSION" in
+              *+*) TAG_CODE="${TAG_VERSION#*+}"; TAG_VERSION="${TAG_VERSION%%+*}" ;;
+            esac
+            if [ "$TAG_VERSION" != "$PUB_NAME" ]; then
+              echo "::error::Tag v$TAG_VERSION không khớp version \"$PUB_NAME\" trong pubspec.yaml. Cập nhật version trong pubspec.yaml hoặc tạo tag đúng."
+              exit 1
+            fi
+            NAME="$TAG_VERSION"
+            CODE="${TAG_CODE:-$PUB_CODE}"
+            PRERELEASE="false"
+          else
+            NAME="${INPUT_VERSION_NAME:-$PUB_NAME}"
+            CODE="${INPUT_VERSION_CODE:-$PUB_CODE}"
+            PRERELEASE="${INPUT_PRERELEASE:-false}"
+          fi
+
+          if ! printf '%s' "$NAME" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tên phiên bản \"$NAME\" không hợp lệ, cần dạng X.Y.Z."
+            exit 1
+          fi
+          case "$CODE" in
+            '' | *[!0-9]*)
+              echo "::error::Mã phiên bản \"$CODE\" phải là số nguyên."
+              exit 1
+              ;;
+          esac
+
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NAME" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo ">> Phát hành v$NAME (build $CODE)"
+
+      - name: Ghi keystore từ GitHub Secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Thiếu secrets ký APK. Cần ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD — xem README mục \"Ký bản phát hành\"."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/release.jks
+          {
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyPassword=$KEY_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storeFile=release.jks"
+          } > android/key.properties
+          echo "Đã ghi android/app/release.jks ($(stat -c%s android/app/release.jks) bytes)"
+
+      - name: Build APK universal
+        # arm + arm64: cài được trên mọi điện thoại thật, bỏ x86/x86_64 (chỉ dùng cho
+        # giả lập) để file nhẹ hơn gần 20MB.
+        run: |
+          flutter build apk --release \
+            --target-platform android-arm,android-arm64 \
+            --build-name="${{ steps.version.outputs.name }}" \
+            --build-number="${{ steps.version.outputs.code }}"
+
+      - name: Build APK theo ABI
+        run: |
+          flutter build apk --release --split-per-abi \
+            --build-name="${{ steps.version.outputs.name }}" \
+            --build-number="${{ steps.version.outputs.code }}"
+
+      - name: Gom file phát hành
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/${APP_FILE_PREFIX}-${NAME}-universal.apk"
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "dist/${APP_FILE_PREFIX}-${NAME}-arm64-v8a.apk"
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "dist/${APP_FILE_PREFIX}-${NAME}-armeabi-v7a.apk"
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Kiểm tra chữ ký APK
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)"
+          for apk in dist/*.apk; do
+            if ! "$APKSIGNER" verify --print-certs "$apk" >/dev/null; then
+              echo "::error::$apk chưa được ký đúng."
+              exit 1
+            fi
+          done
+          "$APKSIGNER" verify --print-certs dist/*-universal.apk | head -n 4
+
+      - name: Soạn ghi chú phát hành
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
+        run: |
+          cat > dist/install-notes.tpl.md <<'EOF'
+          ## Bệnh Lạc v@NAME@ (build @CODE@)
+
+          Ứng dụng nhận diện bệnh cây lạc, chạy hoàn toàn offline trên Android.
+
+          ### Chọn file để tải
+
+          | Thiết bị | File |
+          | --- | --- |
+          | Cài được trên mọi máy (khuyến nghị) | groundnut-disease-app-@NAME@-universal.apk |
+          | Điện thoại 64-bit (hầu hết máy từ 2017) | groundnut-disease-app-@NAME@-arm64-v8a.apk |
+          | Điện thoại 32-bit đời cũ | groundnut-disease-app-@NAME@-armeabi-v7a.apk |
+
+          ### Cài đặt
+
+          1. Mở link này bằng điện thoại rồi tải file APK phù hợp.
+          2. Mở file vừa tải. Nếu Android hỏi, bật "Cài đặt ứng dụng không rõ nguồn gốc" cho trình duyệt hoặc ứng dụng quản lý file.
+          3. Chọn Cài đặt. Bản mới ký cùng khóa với bản cũ nên cài đè được và giữ nguyên lịch sử quét.
+          4. Mở app, cấp quyền camera/thư viện khi được hỏi.
+
+          Yêu cầu: Android 7.0 (API 24) trở lên.
+
+          ### Kiểm tra file tải
+
+          - SHA-256 của từng file nằm trong SHA256SUMS.txt đính kèm.
+          - Khóa ký APK cố định giữa các bản phát hành, nên có thể cập nhật mà không cần gỡ app.
+          EOF
+          sed -e "s/@NAME@/${NAME}/g" -e "s/@CODE@/${CODE}/g" dist/install-notes.tpl.md > dist/install-notes.md
+          rm dist/install-notes.tpl.md
+
+      - name: Lưu artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Tạo GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tải artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Tạo release và đính kèm APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION_NAME: ${{ needs.build.outputs.version_name }}
+          VERSION_CODE: ${{ needs.build.outputs.version_code }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          TITLE="Bệnh Lạc v$VERSION_NAME"
+
+          if gh api "repos/$GH_REPO/releases/tags/$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG đã tồn tại — cập nhật file đính kèm."
+            gh release upload "$TAG" dist/*.apk dist/SHA256SUMS.txt --clobber
+            exit 0
+          fi
+
+          RELEASE_ID="$(gh api "repos/$GH_REPO/releases" \
+            --method POST \
+            -f tag_name="$TAG" \
+            -f name="$TITLE" \
+            -f target_commitish="$GITHUB_SHA" \
+            -F generate_release_notes=true \
+            -F prerelease="$PRERELEASE" \
+            --jq .id)"
+
+          gh release upload "$TAG" dist/*.apk dist/SHA256SUMS.txt --clobber
+
+          GENERATED_NOTES="$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq .body)"
+          {
+            cat dist/install-notes.md
+            echo
+            echo "---"
+            echo
+            echo "$GENERATED_NOTES"
+          } > release-body.md
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" --method PATCH -f body="$(cat release-body.md)" >/dev/null
+
+          echo "Đã tạo release: https://github.com/$GH_REPO/releases/tag/$TAG"
